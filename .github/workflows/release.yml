@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Prepare resource directories
+        shell: bash
+        run: |
+          mkdir -p resources/whisper
+          mkdir -p resources/models
+
+      - name: Download whisper.cpp Windows x64 binary
+        shell: bash
+        run: |
+          echo "Fetching latest whisper.cpp release info..."
+          RELEASE_JSON=$(curl -sf "https://api.github.com/repos/ggerganov/whisper.cpp/releases/latest")
+          RELEASE_TAG=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "Latest tag: $RELEASE_TAG"
+
+          # Try to find a Windows x64 zip asset
+          ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assets = data.get('assets', [])
+          for a in assets:
+              name = a['name'].lower()
+              if 'win' in name and 'x64' in name and name.endswith('.zip'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "No Windows x64 zip found in assets, trying generic zip..."
+            ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assets = data.get('assets', [])
+          for a in assets:
+              name = a['name'].lower()
+              if name.endswith('.zip'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          fi
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: Could not find a whisper.cpp zip release asset."
+            exit 1
+          fi
+
+          echo "Downloading: $ASSET_URL"
+          curl -L "$ASSET_URL" -o whisper-bin.zip
+          unzip -o whisper-bin.zip -d whisper-extracted
+
+          # Find the exe (main.exe or whisper-cli.exe)
+          MAIN_EXE=$(find whisper-extracted -name "main.exe" | head -1)
+          CLI_EXE=$(find whisper-extracted -name "whisper-cli.exe" | head -1)
+
+          if [ -n "$MAIN_EXE" ]; then
+            cp "$MAIN_EXE" resources/whisper/main.exe
+            echo "Copied main.exe"
+          elif [ -n "$CLI_EXE" ]; then
+            cp "$CLI_EXE" resources/whisper/whisper-cli.exe
+            echo "Copied whisper-cli.exe"
+          else
+            echo "ERROR: No main.exe or whisper-cli.exe found in archive."
+            ls -R whisper-extracted
+            exit 1
+          fi
+
+          # Copy any required DLLs
+          find whisper-extracted -name "*.dll" -exec cp {} resources/whisper/ \; 2>/dev/null || true
+
+      - name: Download ggml-base.en model
+        shell: bash
+        run: |
+          echo "Downloading ggml-base.en.bin from HuggingFace..."
+          curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+               -o resources/models/ggml-base.en.bin
+          echo "Model size: $(wc -c < resources/models/ggml-base.en.bin) bytes"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and package
+        run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-electron/Voice-Companion-portable.exe
+          generate_release_notes: true

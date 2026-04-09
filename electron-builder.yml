@@ -1,0 +1,32 @@
+appId: de.flauschipandabot.voice-companion
+productName: Voice Companion
+copyright: Copyright 2025 FlauschiPandaBot
+
+directories:
+  output: dist-electron
+
+files:
+  - dist/main/**/*
+  - node_modules/**/*
+
+extraResources:
+  - from: dist-renderer
+    to: renderer
+  - from: resources/whisper
+    to: whisper
+    filter:
+      - "**/*"
+  - from: resources/models
+    to: models
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  artifactName: Voice-Companion-portable.exe
+
+portable:
+  artifactName: Voice-Companion-portable.exe
