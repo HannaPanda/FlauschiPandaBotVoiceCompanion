@@ -246,8 +246,9 @@ app.whenReady().then(() => {
   wsClient.on('status', (status) => {
     mainWindow?.webContents.send('ws:status', status)
   })
-  wsClient.on('log', (entry) => {
-    console[entry.level](`[WS] ${entry.message}`)
+  wsClient.on('log', (entry: { level: 'info' | 'warn' | 'error'; message: string }) => {
+    const fn = entry.level === 'error' ? console.error : entry.level === 'warn' ? console.warn : console.log
+    fn(`[WS] ${entry.message}`)
     mainWindow?.webContents.send('log:entry', entry)
   })
 
