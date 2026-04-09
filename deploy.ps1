@@ -63,19 +63,19 @@ Write-OK "Types OK"
 Write-Step "Bumping version"
 $pkgJson   = Get-Content "package.json" -Raw | ConvertFrom-Json
 $current   = [version]$pkgJson.version
-$major     = $current.Major
-$minor     = $current.Minor
-$patch     = $current.Build
+$verMajor  = $current.Major
+$verMinor  = $current.Minor
+$verPatch  = $current.Build
 
 if ($Version -ne "") {
     $newVersion = $Version
 } elseif ($Major) {
-    $newVersion = "$($major + 1).0.0"
+    $newVersion = "$($verMajor + 1).0.0"
 } elseif ($Patch) {
-    $newVersion = "$major.$minor.$($patch + 1)"
+    $newVersion = "$verMajor.$verMinor.$($verPatch + 1)"
 } else {
     # default: Minor
-    $newVersion = "$major.$($minor + 1).0"
+    $newVersion = "$verMajor.$($verMinor + 1).0"
 }
 
 Write-OK "Version: $current -> $newVersion"
