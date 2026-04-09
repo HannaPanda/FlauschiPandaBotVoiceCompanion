@@ -55,8 +55,9 @@ function createWindow(): void {
     }
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+  if (!app.isPackaged) {
+    const devUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173'
+    mainWindow.loadURL(devUrl)
     mainWindow.webContents.openDevTools({ mode: 'detach' })
   } else {
     mainWindow.loadFile(path.join(process.resourcesPath, 'renderer', 'index.html'))
