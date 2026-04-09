@@ -30,48 +30,61 @@ jobs:
 
       - name: Download whisper.cpp Windows x64 binary
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Fetching latest whisper.cpp release info..."
-          RELEASE_JSON=$(curl -sf "https://api.github.com/repos/ggerganov/whisper.cpp/releases/latest")
-          RELEASE_TAG=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "Fetching latest whisper.cpp release tag..."
+          RELEASE_TAG=$(gh release list --repo ggerganov/whisper.cpp --limit 1 --json tagName --jq '.[0].tagName')
           echo "Latest tag: $RELEASE_TAG"
 
-          # Try to find a Windows x64 zip asset
-          ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          assets = data.get('assets', [])
-          for a in assets:
-              name = a['name'].lower()
-              if 'win' in name and 'x64' in name and name.endswith('.zip'):
-                  print(a['browser_download_url'])
-                  break
-          ")
+          # List all assets for inspection
+          echo "Available assets:"
+          gh release view "$RELEASE_TAG" --repo ggerganov/whisper.cpp --json assets --jq '.assets[].name'
 
-          if [ -z "$ASSET_URL" ]; then
-            echo "No Windows x64 zip found in assets, trying generic zip..."
-            ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          assets = data.get('assets', [])
-          for a in assets:
-              name = a['name'].lower()
-              if name.endswith('.zip'):
-                  print(a['browser_download_url'])
-                  break
-          ")
+          # Try to find a Windows x64 zip (CPU/BLAS variants, no CUDA)
+          ASSET=$(gh release view "$RELEASE_TAG" \
+            --repo ggerganov/whisper.cpp \
+            --json assets \
+            --jq '.assets[] | select(
+              (.name | ascii_downcase | test("x64")) and
+              (.name | ascii_downcase | test("win|blas")) and
+              (.name | ascii_downcase | test("cuda|cublas|hipblas") | not) and
+              (.name | endswith(".zip"))
+            ) | .name' | head -1)
+
+          if [ -z "$ASSET" ]; then
+            echo "Fallback: any x64 zip..."
+            ASSET=$(gh release view "$RELEASE_TAG" \
+              --repo ggerganov/whisper.cpp \
+              --json assets \
+              --jq '.assets[] | select((.name | ascii_downcase | test("x64")) and (.name | endswith(".zip"))) | .name' | head -1)
           fi
 
-          if [ -z "$ASSET_URL" ]; then
-            echo "ERROR: Could not find a whisper.cpp zip release asset."
+          if [ -z "$ASSET" ]; then
+            echo "Fallback: first zip asset..."
+            ASSET=$(gh release view "$RELEASE_TAG" \
+              --repo ggerganov/whisper.cpp \
+              --json assets \
+              --jq '.assets[] | select(.name | endswith(".zip")) | .name' | head -1)
+          fi
+
+          if [ -z "$ASSET" ]; then
+            echo "ERROR: No zip asset found in whisper.cpp release $RELEASE_TAG"
             exit 1
           fi
 
-          echo "Downloading: $ASSET_URL"
-          curl -L "$ASSET_URL" -o whisper-bin.zip
-          unzip -o whisper-bin.zip -d whisper-extracted
+          echo "Downloading asset: $ASSET"
+          gh release download "$RELEASE_TAG" \
+            --repo ggerganov/whisper.cpp \
+            --pattern "$ASSET" \
+            --dir .
 
-          # Find the exe (main.exe or whisper-cli.exe)
+          unzip -o "$ASSET" -d whisper-extracted
+
+          echo "Contents of archive:"
+          find whisper-extracted -type f
+
+          # Find the main CLI exe (main.exe or whisper-cli.exe)
           MAIN_EXE=$(find whisper-extracted -name "main.exe" | head -1)
           CLI_EXE=$(find whisper-extracted -name "whisper-cli.exe" | head -1)
 
@@ -83,19 +96,22 @@ jobs:
             echo "Copied whisper-cli.exe"
           else
             echo "ERROR: No main.exe or whisper-cli.exe found in archive."
-            ls -R whisper-extracted
             exit 1
           fi
 
-          # Copy any required DLLs
+          # Copy all DLLs (required libs)
           find whisper-extracted -name "*.dll" -exec cp {} resources/whisper/ \; 2>/dev/null || true
+
+          echo "Whisper resources:"
+          ls resources/whisper/
 
       - name: Download ggml-base.en model
         shell: bash
         run: |
           echo "Downloading ggml-base.en.bin from HuggingFace..."
-          curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-               -o resources/models/ggml-base.en.bin
+          curl -L --retry 3 \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+            -o resources/models/ggml-base.en.bin
           echo "Model size: $(wc -c < resources/models/ggml-base.en.bin) bytes"
 
       - name: Install dependencies
