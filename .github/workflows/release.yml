@@ -84,18 +84,18 @@ jobs:
           echo "Contents of archive:"
           find whisper-extracted -type f
 
-          # Find the main CLI exe (main.exe or whisper-cli.exe)
-          MAIN_EXE=$(find whisper-extracted -name "main.exe" | head -1)
+          # Find whisper-cli.exe (preferred) or main.exe (deprecated fallback)
           CLI_EXE=$(find whisper-extracted -name "whisper-cli.exe" | head -1)
+          MAIN_EXE=$(find whisper-extracted -name "main.exe" | head -1)
 
-          if [ -n "$MAIN_EXE" ]; then
-            cp "$MAIN_EXE" resources/whisper/main.exe
-            echo "Copied main.exe"
-          elif [ -n "$CLI_EXE" ]; then
+          if [ -n "$CLI_EXE" ]; then
             cp "$CLI_EXE" resources/whisper/whisper-cli.exe
             echo "Copied whisper-cli.exe"
+          elif [ -n "$MAIN_EXE" ]; then
+            cp "$MAIN_EXE" resources/whisper/main.exe
+            echo "Copied main.exe (deprecated fallback)"
           else
-            echo "ERROR: No main.exe or whisper-cli.exe found in archive."
+            echo "ERROR: No whisper-cli.exe or main.exe found in archive."
             exit 1
           fi
 

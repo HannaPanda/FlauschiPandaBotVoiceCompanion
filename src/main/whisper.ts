@@ -18,7 +18,8 @@ function getResourcesDir(): string {
 
 function getWhisperBinaryPath(): string {
   const dir = path.join(getResourcesDir(), 'whisper')
-  for (const name of ['main.exe', 'whisper-cli.exe']) {
+  // whisper-cli.exe first — main.exe is deprecated and exits with code 1
+  for (const name of ['whisper-cli.exe', 'main.exe']) {
     const p = path.join(dir, name)
     if (fs.existsSync(p)) return p
   }
