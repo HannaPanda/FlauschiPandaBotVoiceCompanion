@@ -1,6 +1,6 @@
 {
   "name": "voice-companion",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "FlauschiPandaBot Voice Companion",
   "main": "dist/main/index.js",
   "scripts": {
