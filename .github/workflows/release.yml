@@ -41,31 +41,31 @@ jobs:
           echo "Available assets:"
           gh release view "$RELEASE_TAG" --repo ggerganov/whisper.cpp --json assets --jq '.assets[].name'
 
-          # Try to find a Windows x64 zip (CPU/BLAS variants, no CUDA)
+          # Pick the plain CPU build (whisper-bin-x64.zip) — NOT blas/cuda variants
+          # BLAS build needs libopenblas.dll which isn't bundled and causes silent crash
           ASSET=$(gh release view "$RELEASE_TAG" \
             --repo ggerganov/whisper.cpp \
             --json assets \
-            --jq '.assets[] | select(
-              (.name | ascii_downcase | test("x64")) and
-              (.name | ascii_downcase | test("win|blas")) and
-              (.name | ascii_downcase | test("cuda|cublas|hipblas") | not) and
-              (.name | endswith(".zip"))
-            ) | .name' | head -1)
+            --jq '.assets[] | select(.name == "whisper-bin-x64.zip") | .name' | head -1)
 
           if [ -z "$ASSET" ]; then
-            echo "Fallback: any x64 zip..."
+            echo "Fallback: any x64 zip without blas/cuda..."
+            ASSET=$(gh release view "$RELEASE_TAG" \
+              --repo ggerganov/whisper.cpp \
+              --json assets \
+              --jq '.assets[] | select(
+                (.name | ascii_downcase | test("x64")) and
+                (.name | ascii_downcase | test("blas|cuda|cublas|hipblas") | not) and
+                (.name | endswith(".zip"))
+              ) | .name' | head -1)
+          fi
+
+          if [ -z "$ASSET" ]; then
+            echo "Fallback: first x64 zip..."
             ASSET=$(gh release view "$RELEASE_TAG" \
               --repo ggerganov/whisper.cpp \
               --json assets \
               --jq '.assets[] | select((.name | ascii_downcase | test("x64")) and (.name | endswith(".zip"))) | .name' | head -1)
-          fi
-
-          if [ -z "$ASSET" ]; then
-            echo "Fallback: first zip asset..."
-            ASSET=$(gh release view "$RELEASE_TAG" \
-              --repo ggerganov/whisper.cpp \
-              --json assets \
-              --jq '.assets[] | select(.name | endswith(".zip")) | .name' | head -1)
           fi
 
           if [ -z "$ASSET" ]; then

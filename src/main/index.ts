@@ -20,6 +20,7 @@ let splashWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isRecording = false
 let currentPttKey = ''
+const startupLogs: { timestamp: string; level: string; message: string }[] = []
 
 // uiohook for hold-to-talk (loaded lazily)
 let uiohookStarted = false
@@ -138,6 +139,10 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => {
     closeSplash()
     mainWindow?.show()
+    // Send buffered startup logs once renderer is ready
+    for (const line of startupLogs) {
+      mainWindow?.webContents.send('log:entry', line)
+    }
   })
 
   mainWindow.on('closed', () => { mainWindow = null })
@@ -357,10 +362,18 @@ app.whenReady().then(() => {
     mainWindow?.webContents.send('log:entry', entry)
   })
 
-  // Diagnose whisper on startup
+  // Diagnose whisper on startup — buffer for renderer
   const diag = diagnoseWhisper()
-  for (const line of diag.details) log('info', `[whisper-diag] ${line}`)
-  if (!diag.ok) log('error', '[whisper-diag] Whisper binary NOT functional — check log above')
+  for (const line of diag.details) {
+    const entry = { timestamp: new Date().toISOString(), level: 'info', message: `[whisper-diag] ${line}` }
+    console.log(entry.message)
+    startupLogs.push(entry)
+  }
+  if (!diag.ok) {
+    const entry = { timestamp: new Date().toISOString(), level: 'error', message: '[whisper-diag] Whisper binary NOT functional — check log above' }
+    console.error(entry.message)
+    startupLogs.push(entry)
+  }
 
   const s = getSettings()
   if (s.wsEnabled) wsClient.connect()
