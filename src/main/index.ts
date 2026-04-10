@@ -9,6 +9,7 @@ import {
   session,
 } from 'electron'
 import * as path from 'path'
+import * as fs from 'fs'
 import { getSettings, setSettings, Settings } from './settings'
 import { wsClient } from './ws-client'
 import { transcribeAudio } from './whisper'
@@ -17,6 +18,13 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isRecording = false
 let currentPttKey = ''
+
+function getAssetPath(filename: string): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'assets', filename)
+  }
+  return path.join(__dirname, '../../assets', filename)
+}
 
 // ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +37,9 @@ function log(level: 'info' | 'warn' | 'error', message: string): void {
 // ── Window ─────────────────────────────────────────────────────────────────────
 
 function createWindow(): void {
+  const icoPath = getAssetPath('icon.ico')
+  const iconOpts = fs.existsSync(icoPath) ? { icon: icoPath } : {}
+
   mainWindow = new BrowserWindow({
     width: 450,
     height: 700,
@@ -39,6 +50,7 @@ function createWindow(): void {
     backgroundColor: '#1a1a2e',
     resizable: true,
     show: false,
+    ...iconOpts,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -75,7 +87,10 @@ function createWindow(): void {
 // ── Tray ───────────────────────────────────────────────────────────────────────
 
 function createTray(): void {
-  const icon = nativeImage.createEmpty()
+  const pngPath = getAssetPath('icon.png')
+  const icon = fs.existsSync(pngPath)
+    ? nativeImage.createFromPath(pngPath).resize({ width: 16, height: 16 })
+    : nativeImage.createEmpty()
   tray = new Tray(icon)
   tray.setToolTip('Voice Companion')
   updateTrayMenu()

@@ -9,6 +9,8 @@
     "dev:main": "tsc -p tsconfig.main.json --watch",
     "dev:electron": "wait-on dist/main/index.js && electron .",
     "build": "tsc -p tsconfig.main.json && vite build",
+    "build:icons": "node scripts/build-icons.cjs",
+    "predist": "npm run build:icons",
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit"
   },
@@ -33,6 +35,7 @@
     "typescript": "^5.5.3",
     "vite": "^5.3.4",
     "wait-on": "^7.2.0",
-    "@types/ws": "^8.5.12"
+    "@types/ws": "^8.5.12",
+    "png-to-ico": "^2.1.8"
   }
 }

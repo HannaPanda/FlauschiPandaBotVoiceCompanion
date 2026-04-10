@@ -20,8 +20,14 @@ extraResources:
     to: models
     filter:
       - "**/*"
+  - from: assets
+    to: assets
+    filter:
+      - "icon.png"
+      - "icon.ico"
 
 win:
+  icon: assets/icon.ico
   target:
     - target: portable
       arch:

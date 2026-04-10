@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { AppSettings } from '../App'
+import KeyCapture from '../components/KeyCapture'
 
 interface Props {
   settings: AppSettings
@@ -121,13 +122,8 @@ export default function Settings({ settings, onSave }: Props) {
           <Field label="Enable">
             <Toggle value={form.pttEnabled} onChange={(v) => set('pttEnabled', v)} />
           </Field>
-          <Field label="Key (Electron Accelerator, e.g. F9, Control+Space)">
-            <input
-              className={inputClass}
-              value={form.pttKey}
-              onChange={(e) => set('pttKey', e.target.value)}
-              placeholder="F9"
-            />
+          <Field label="Taste / Kombination">
+            <KeyCapture value={form.pttKey} onChange={(v) => set('pttKey', v)} />
           </Field>
         </Section>
 

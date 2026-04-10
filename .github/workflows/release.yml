@@ -117,6 +117,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build icons
+        shell: bash
+        run: node scripts/build-icons.cjs
+
       - name: Build and package
         run: npm run dist
         env:
