@@ -7,6 +7,7 @@ import {
   Menu,
   nativeImage,
   session,
+  protocol,
 } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
@@ -15,26 +16,76 @@ import { wsClient } from './ws-client'
 import { transcribeAudio } from './whisper'
 
 let mainWindow: BrowserWindow | null = null
+let splashWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isRecording = false
 let currentPttKey = ''
 
+// uiohook for hold-to-talk (loaded lazily)
+let uiohookStarted = false
+const modState = { ctrl: false, alt: false, shift: false, meta: false }
+
+// ── Paths ──────────────────────────────────────────────────────────────────────
+
 function getAssetPath(filename: string): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'assets', filename)
-  }
+  if (app.isPackaged) return path.join(process.resourcesPath, 'assets', filename)
   return path.join(__dirname, '../../assets', filename)
+}
+
+function getRendererPath(filename: string): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'renderer', filename)
+  return path.join(__dirname, '../../src/renderer/public', filename)
 }
 
 // ── Logging ────────────────────────────────────────────────────────────────────
 
 function log(level: 'info' | 'warn' | 'error', message: string): void {
   const entry = { timestamp: new Date().toISOString(), level, message }
-  console[level](`[${entry.timestamp}] ${message}`)
+  const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
+  fn(`[${entry.timestamp}] ${message}`)
   mainWindow?.webContents.send('log:entry', entry)
 }
 
-// ── Window ─────────────────────────────────────────────────────────────────────
+// ── Protocol ───────────────────────────────────────────────────────────────────
+
+function registerAppProtocol(): void {
+  protocol.registerFileProtocol('app', (request, callback) => {
+    const url = request.url.replace('app://', '')
+    const decoded = decodeURIComponent(url)
+    const filePath = app.isPackaged
+      ? path.join(process.resourcesPath, decoded)
+      : path.join(__dirname, '../../', decoded)
+    callback({ path: filePath })
+  })
+}
+
+// ── Splash ─────────────────────────────────────────────────────────────────────
+
+function createSplash(): void {
+  splashWindow = new BrowserWindow({
+    width: 360,
+    height: 360,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#0d0d1a',
+    resizable: false,
+    center: true,
+    show: true,
+    skipTaskbar: true,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  })
+  splashWindow.loadFile(getRendererPath('splash.html'))
+  splashWindow.on('closed', () => { splashWindow = null })
+}
+
+function closeSplash(): void {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close()
+    splashWindow = null
+  }
+}
+
+// ── Main Window ────────────────────────────────────────────────────────────────
 
 function createWindow(): void {
   const icoPath = getAssetPath('icon.ico')
@@ -58,30 +109,23 @@ function createWindow(): void {
     },
   })
 
-  // Allow microphone access
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    if (permission === 'media') {
-      callback(true)
-    } else {
-      callback(false)
-    }
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media')
   })
 
   if (!app.isPackaged) {
-    const devUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173'
-    mainWindow.loadURL(devUrl)
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173')
     mainWindow.webContents.openDevTools({ mode: 'detach' })
   } else {
     mainWindow.loadFile(path.join(process.resourcesPath, 'renderer', 'index.html'))
   }
 
   mainWindow.once('ready-to-show', () => {
+    closeSplash()
     mainWindow?.show()
   })
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
-  })
+  mainWindow.on('closed', () => { mainWindow = null })
 }
 
 // ── Tray ───────────────────────────────────────────────────────────────────────
@@ -93,48 +137,23 @@ function createTray(): void {
     : nativeImage.createEmpty()
   tray = new Tray(icon)
   tray.setToolTip('Voice Companion')
-  updateTrayMenu()
-
-  tray.on('click', () => {
-    if (mainWindow) {
-      if (mainWindow.isVisible()) {
-        mainWindow.hide()
-      } else {
-        mainWindow.show()
-        mainWindow.focus()
-      }
-    }
-  })
-}
-
-function updateTrayMenu(): void {
-  if (!tray) return
-  const menu = Menu.buildFromTemplate([
-    {
-      label: 'Show / Hide',
-      click: () => {
-        if (mainWindow?.isVisible()) {
-          mainWindow.hide()
-        } else {
-          mainWindow?.show()
-          mainWindow?.focus()
-        }
-      },
-    },
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Zeigen / Verstecken', click: toggleWindow },
     { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        app.quit()
-      },
-    },
-  ])
-  tray.setContextMenu(menu)
+    { label: 'Beenden', click: () => app.quit() },
+  ]))
+  tray.on('click', toggleWindow)
 }
 
-// ── PTT Shortcut ───────────────────────────────────────────────────────────────
+function toggleWindow(): void {
+  if (!mainWindow) return
+  if (mainWindow.isVisible()) { mainWindow.hide() }
+  else { mainWindow.show(); mainWindow.focus() }
+}
 
-function registerPtt(key: string): void {
+// ── PTT – Toggle mode (globalShortcut) ────────────────────────────────────────
+
+function registerTogglePtt(key: string): void {
   if (!key) return
   try {
     globalShortcut.register(key, () => {
@@ -149,78 +168,136 @@ function registerPtt(key: string): void {
       }
     })
     currentPttKey = key
-    log('info', `PTT registered: ${key}`)
+    log('info', `Toggle PTT registered: ${key}`)
   } catch (err) {
-    log('error', `Failed to register PTT key "${key}": ${(err as Error).message}`)
+    log('error', `Failed to register toggle PTT "${key}": ${(err as Error).message}`)
   }
 }
 
-function unregisterPtt(): void {
+function unregisterTogglePtt(): void {
   if (currentPttKey) {
-    try {
-      globalShortcut.unregister(currentPttKey)
-    } catch {
-      // ignore
-    }
+    try { globalShortcut.unregister(currentPttKey) } catch { /* ignore */ }
     currentPttKey = ''
   }
 }
 
-// ── IPC Handlers ───────────────────────────────────────────────────────────────
+// ── PTT – Hold mode (uiohook-napi) ────────────────────────────────────────────
+
+const CTRL_CODES  = new Set([0x1D, 0xE01D])
+const ALT_CODES   = new Set([0x38, 0xE038])
+const SHIFT_CODES = new Set([0x2A, 0x36])
+const META_CODES  = new Set([0xE05B, 0xE05C])
+
+function startUiohook(): void {
+  if (uiohookStarted) return
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { uIOhook } = require('uiohook-napi') as typeof import('uiohook-napi')
+
+    uIOhook.on('keydown', (e) => {
+      if (CTRL_CODES.has(e.keycode))  modState.ctrl  = true
+      if (ALT_CODES.has(e.keycode))   modState.alt   = true
+      if (SHIFT_CODES.has(e.keycode)) modState.shift = true
+      if (META_CODES.has(e.keycode))  modState.meta  = true
+
+      const s = getSettings()
+      if (!s.pttEnabled || s.pttMode !== 'ptt' || isRecording) return
+      if (e.keycode !== s.pttKeyCode) return
+      if (modState.ctrl !== s.pttModCtrl)   return
+      if (modState.alt  !== s.pttModAlt)    return
+      if (modState.shift !== s.pttModShift) return
+      if (modState.meta !== s.pttModMeta)   return
+
+      log('info', 'PTT: start (hold)')
+      isRecording = true
+      mainWindow?.webContents.send('ptt:start')
+    })
+
+    uIOhook.on('keyup', (e) => {
+      if (CTRL_CODES.has(e.keycode))  modState.ctrl  = false
+      if (ALT_CODES.has(e.keycode))   modState.alt   = false
+      if (SHIFT_CODES.has(e.keycode)) modState.shift = false
+      if (META_CODES.has(e.keycode))  modState.meta  = false
+
+      const s = getSettings()
+      if (!s.pttEnabled || s.pttMode !== 'ptt' || !isRecording) return
+      if (e.keycode !== s.pttKeyCode) return
+
+      log('info', 'PTT: stop (key released)')
+      isRecording = false
+      mainWindow?.webContents.send('ptt:stop')
+    })
+
+    uIOhook.start()
+    uiohookStarted = true
+    log('info', 'uiohook started (hold-to-talk ready)')
+  } catch (err) {
+    log('warn', `uiohook-napi not available: ${(err as Error).message}. Hold-to-talk disabled.`)
+  }
+}
+
+function stopUiohook(): void {
+  if (!uiohookStarted) return
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { uIOhook } = require('uiohook-napi') as typeof import('uiohook-napi')
+    uIOhook.stop()
+    uiohookStarted = false
+  } catch { /* ignore */ }
+}
+
+// ── Apply PTT settings ─────────────────────────────────────────────────────────
+
+function applyPttSettings(s: Settings): void {
+  unregisterTogglePtt()
+  stopUiohook()
+
+  if (!s.pttEnabled) return
+
+  if (s.pttMode === 'toggle') {
+    registerTogglePtt(s.pttKey)
+  } else {
+    // hold mode – needs uiohook
+    if (s.pttKeyCode > 0) startUiohook()
+    else log('warn', 'PTT hold mode: no key code set. Configure a key in Settings.')
+  }
+}
+
+// ── IPC ────────────────────────────────────────────────────────────────────────
 
 function setupIpcHandlers(): void {
-  ipcMain.handle('settings:get', () => {
-    return getSettings()
-  })
 
-  ipcMain.handle('settings:set', (_event, partial: Partial<Settings>) => {
-    const oldSettings = getSettings()
+  ipcMain.handle('settings:get', () => getSettings())
 
-    // Handle PTT key change
-    if (partial.pttKey && partial.pttKey !== oldSettings.pttKey) {
-      unregisterPtt()
-    }
-
+  ipcMain.handle('settings:set', (_e, partial: Partial<Settings>) => {
+    const old = getSettings()
     setSettings(partial)
-    const newSettings = getSettings()
+    const updated = getSettings()
 
-    // Re-register PTT if needed
-    if (partial.pttKey && partial.pttKey !== oldSettings.pttKey) {
-      if (newSettings.pttEnabled) {
-        registerPtt(newSettings.pttKey)
-      }
-    }
-    if (partial.pttEnabled !== undefined) {
-      if (partial.pttEnabled) {
-        if (!currentPttKey) registerPtt(newSettings.pttKey)
-      } else {
-        unregisterPtt()
-      }
-    }
+    const pttChanged = ['pttEnabled','pttMode','pttKey','pttKeyCode',
+      'pttModCtrl','pttModAlt','pttModShift','pttModMeta']
+      .some(k => (partial as Record<string,unknown>)[k] !== undefined)
 
-    // Handle WS URL/secret/enabled changes
-    if (
-      partial.wsUrl !== undefined ||
-      partial.wsSecret !== undefined ||
-      partial.wsEnabled !== undefined
-    ) {
+    if (pttChanged) applyPttSettings(updated)
+
+    const wsChanged = ['wsUrl','wsSecret','wsEnabled']
+      .some(k => (partial as Record<string,unknown>)[k] !== undefined)
+
+    if (wsChanged) {
       wsClient.disconnect()
-      if (newSettings.wsEnabled) {
-        wsClient.connect()
-      }
+      if (updated.wsEnabled) wsClient.connect()
     }
 
-    mainWindow?.webContents.send('settings:changed', newSettings)
+    mainWindow?.webContents.send('settings:changed', updated)
     log('info', 'Settings updated')
   })
 
   ipcMain.handle('settings:test-ws', async () => {
-    const settings = getSettings()
-    return wsClient.testConnection(settings.wsUrl, settings.wsSecret)
+    const s = getSettings()
+    return wsClient.testConnection(s.wsUrl, s.wsSecret)
   })
 
-  // Transcribe audio and return text. Renderer decides whether to send to WS.
-  ipcMain.handle('audio:submit', async (_event, buffer: ArrayBuffer) => {
+  ipcMain.handle('audio:submit', async (_e, buffer: ArrayBuffer) => {
     try {
       log('info', 'Transcribing audio…')
       const transcript = await transcribeAudio(buffer)
@@ -228,36 +305,33 @@ function setupIpcHandlers(): void {
       isRecording = false
       return transcript
     } catch (err) {
-      const msg = (err as Error).message
-      log('error', `Transcription error: ${msg}`)
+      log('error', `Transcription error: ${(err as Error).message}`)
       isRecording = false
       throw err
     }
   })
 
-  // Send transcribed text to WebSocket
-  ipcMain.handle('ws:voice-input', (_event, text: string) => {
+  ipcMain.handle('ws:voice-input', (_e, text: string) => {
     wsClient.sendVoiceInput(text)
     mainWindow?.webContents.send('transcription:result', text)
   })
 
-  ipcMain.on('window:minimize', () => {
-    mainWindow?.minimize()
-  })
+  ipcMain.on('window:minimize', () => mainWindow?.minimize())
+  ipcMain.on('window:close',    () => mainWindow?.hide())
 
-  ipcMain.on('window:close', () => {
-    mainWindow?.hide()
-  })
+  // Microphone enumeration (renderer uses Web API, but we proxy for IPC pattern)
+  // Actual enumeration happens in renderer via navigator.mediaDevices.enumerateDevices()
 }
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  registerAppProtocol()
+  createSplash()
   createWindow()
   createTray()
   setupIpcHandlers()
 
-  // Wire WS client events to renderer
   wsClient.on('status', (status) => {
     mainWindow?.webContents.send('ws:status', status)
   })
@@ -267,27 +341,15 @@ app.whenReady().then(() => {
     mainWindow?.webContents.send('log:entry', entry)
   })
 
-  // Initial WS connect
-  const settings = getSettings()
-  if (settings.wsEnabled) {
-    wsClient.connect()
-  }
-
-  // Register PTT
-  if (settings.pttEnabled && settings.pttKey) {
-    registerPtt(settings.pttKey)
-  }
+  const s = getSettings()
+  if (s.wsEnabled) wsClient.connect()
+  applyPttSettings(s)
 })
 
-app.on('window-all-closed', () => {
-  // Keep running in tray
-})
-
-app.on('activate', () => {
-  if (!mainWindow) createWindow()
-})
-
+app.on('window-all-closed', () => { /* keep running in tray */ })
+app.on('activate', () => { if (!mainWindow) createWindow() })
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  stopUiohook()
   wsClient.destroy()
 })

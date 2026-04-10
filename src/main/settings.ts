@@ -5,8 +5,15 @@ export interface Settings {
   wsUrl: string
   wsSecret: string
 
+  /** 'ptt' = hold key to talk, 'toggle' = press to start/stop */
+  pttMode: 'ptt' | 'toggle'
   pttEnabled: boolean
-  pttKey: string
+  pttKey: string          // Electron accelerator (for toggle) / display label (for ptt)
+  pttKeyCode: number      // uiohook scan code (for ptt hold mode), 0 = unset
+  pttModCtrl: boolean
+  pttModAlt: boolean
+  pttModShift: boolean
+  pttModMeta: boolean
 
   keywordEnabled: boolean
   keyword: string
@@ -14,6 +21,8 @@ export interface Settings {
   silenceDuration: number
   silenceThreshold: number
   recordingTimeout: number
+
+  micDeviceId: string     // '' = system default
 
   whisperMode: 'whisper.cpp' | 'openai'
   whisperModelPath: string
@@ -27,8 +36,14 @@ const defaults: Settings = {
   wsUrl: 'wss://api.flauschipandabot.de/voice',
   wsSecret: '',
 
+  pttMode: 'toggle',
   pttEnabled: true,
   pttKey: 'F9',
+  pttKeyCode: 0,
+  pttModCtrl: false,
+  pttModAlt: false,
+  pttModShift: false,
+  pttModMeta: false,
 
   keywordEnabled: false,
   keyword: 'hey panda',
@@ -36,6 +51,8 @@ const defaults: Settings = {
   silenceDuration: 1500,
   silenceThreshold: 0.02,
   recordingTimeout: 30000,
+
+  micDeviceId: '',
 
   whisperMode: 'whisper.cpp',
   whisperModelPath: '',

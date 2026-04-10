@@ -7,6 +7,7 @@ export interface RecorderOptions {
   silenceDuration: number    // ms of silence before auto-stop
   silenceThreshold: number   // RMS 0-1 range
   recordingTimeout: number   // max ms
+  micDeviceId?: string       // '' or undefined = system default
   onRecordingStart?: () => void
   onRecordingStop?: () => void
   onSpeechDetected?: () => void
@@ -99,7 +100,10 @@ function calcRMS(data: Float32Array): number {
 
 export async function createAudioRecorder(options: RecorderOptions): Promise<AudioRecorder> {
   const audioCtx = new AudioContext()
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+  const audioConstraints: MediaTrackConstraints = options.micDeviceId
+    ? { deviceId: { exact: options.micDeviceId }, echoCancellation: true, noiseSuppression: true }
+    : { echoCancellation: true, noiseSuppression: true }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
   const source = audioCtx.createMediaStreamSource(stream)
 
   // AnalyserNode for VAD

@@ -8,13 +8,20 @@ export interface AppSettings {
   wsEnabled: boolean
   wsUrl: string
   wsSecret: string
+  pttMode: 'ptt' | 'toggle'
   pttEnabled: boolean
   pttKey: string
+  pttKeyCode: number
+  pttModCtrl: boolean
+  pttModAlt: boolean
+  pttModShift: boolean
+  pttModMeta: boolean
   keywordEnabled: boolean
   keyword: string
   silenceDuration: number
   silenceThreshold: number
   recordingTimeout: number
+  micDeviceId: string
   whisperMode: 'whisper.cpp' | 'openai'
   whisperModelPath: string
   language: string
@@ -89,6 +96,7 @@ export default function App() {
       silenceDuration: s?.silenceDuration ?? 1500,
       silenceThreshold: s?.silenceThreshold ?? 0.02,
       recordingTimeout: s?.recordingTimeout ?? 30000,
+      micDeviceId: s?.micDeviceId ?? '',
       onRecordingStart: () => setIsRecording(true),
       onRecordingStop: () => setIsRecording(false),
     })
@@ -181,6 +189,14 @@ export default function App() {
       }
     }
   }, [settings?.keywordEnabled, settings?.keyword, getRecorder, addLog])
+
+  // Recreate recorder when mic device changes
+  useEffect(() => {
+    if (recorderRef.current) {
+      recorderRef.current.cleanup()
+      recorderRef.current = null
+    }
+  }, [settings?.micDeviceId])
 
   // Cleanup recorder on unmount
   useEffect(() => {
@@ -287,6 +303,7 @@ declare global {
       submitAudio(buffer: ArrayBuffer): Promise<string>
       sendVoiceInput(text: string): Promise<void>
       onPttStart(cb: () => void): () => void
+      onPttStop(cb: () => void): () => void
       onPttStop(cb: () => void): () => void
       onWsStatus(cb: (status: WsStatus) => void): () => void
       onLogEntry(cb: (entry: LogEntry) => void): () => void
