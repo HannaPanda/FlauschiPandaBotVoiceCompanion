@@ -13,7 +13,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { getSettings, setSettings, Settings } from './settings'
 import { wsClient } from './ws-client'
-import { transcribeAudio } from './whisper'
+import { transcribeAudio, diagnoseWhisper } from './whisper'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -87,9 +87,24 @@ function closeSplash(): void {
 
 // ── Main Window ────────────────────────────────────────────────────────────────
 
+function loadAppIcon(): Electron.NativeImage | undefined {
+  // Try ICO first (best for Windows taskbar), then PNG
+  for (const name of ['icon.ico', 'icon.png']) {
+    const p = getAssetPath(name)
+    if (fs.existsSync(p)) {
+      const img = nativeImage.createFromPath(p)
+      if (!img.isEmpty()) {
+        log('info', `Loaded app icon from ${p} (${img.getSize().width}x${img.getSize().height})`)
+        return img
+      }
+    }
+  }
+  log('warn', 'No app icon found')
+  return undefined
+}
+
 function createWindow(): void {
-  const icoPath = getAssetPath('icon.ico')
-  const iconOpts = fs.existsSync(icoPath) ? { icon: icoPath } : {}
+  const appIcon = loadAppIcon()
 
   mainWindow = new BrowserWindow({
     width: 450,
@@ -101,7 +116,7 @@ function createWindow(): void {
     backgroundColor: '#1a1a2e',
     resizable: true,
     show: false,
-    ...iconOpts,
+    ...(appIcon ? { icon: appIcon } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -131,9 +146,10 @@ function createWindow(): void {
 // ── Tray ───────────────────────────────────────────────────────────────────────
 
 function createTray(): void {
-  const pngPath = getAssetPath('icon.png')
-  const icon = fs.existsSync(pngPath)
-    ? nativeImage.createFromPath(pngPath).resize({ width: 16, height: 16 })
+  const appIcon = loadAppIcon()
+  // Windows tray icons are typically 16x16 but we provide 32x32 for high-DPI
+  const icon = appIcon
+    ? appIcon.resize({ width: 32, height: 32 })
     : nativeImage.createEmpty()
   tray = new Tray(icon)
   tray.setToolTip('Voice Companion')
@@ -340,6 +356,11 @@ app.whenReady().then(() => {
     fn(`[WS] ${entry.message}`)
     mainWindow?.webContents.send('log:entry', entry)
   })
+
+  // Diagnose whisper on startup
+  const diag = diagnoseWhisper()
+  for (const line of diag.details) log('info', `[whisper-diag] ${line}`)
+  if (!diag.ok) log('error', '[whisper-diag] Whisper binary NOT functional — check log above')
 
   const s = getSettings()
   if (s.wsEnabled) wsClient.connect()
