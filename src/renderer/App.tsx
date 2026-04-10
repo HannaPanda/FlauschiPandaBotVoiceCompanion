@@ -119,6 +119,10 @@ export default function App() {
           const recorder = await getRecorder()
           const wav = await recorder.stopRecording()
           setIsRecording(false)
+          if (wav.byteLength < 16044) {
+            addLog({ timestamp: new Date().toISOString(), level: 'info', message: 'PTT: recording too short, skipped' })
+            return
+          }
           addLog({ timestamp: new Date().toISOString(), level: 'info', message: 'PTT recording stopped, transcribing…' })
           const transcript = await window.voiceApi.submitAudio(wav)
           if (transcript) {
