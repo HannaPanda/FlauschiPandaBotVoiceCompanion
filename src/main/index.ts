@@ -88,16 +88,13 @@ function closeSplash(): void {
 
 // ── Main Window ────────────────────────────────────────────────────────────────
 
-function loadAppIcon(): Electron.NativeImage | undefined {
-  // Try ICO first (best for Windows taskbar), then PNG
+function getAppIconPath(): string | undefined {
+  // ICO for Windows taskbar/window, PNG fallback
   for (const name of ['icon.ico', 'icon.png']) {
     const p = getAssetPath(name)
     if (fs.existsSync(p)) {
-      const img = nativeImage.createFromPath(p)
-      if (!img.isEmpty()) {
-        log('info', `Loaded app icon from ${p} (${img.getSize().width}x${img.getSize().height})`)
-        return img
-      }
+      log('info', `App icon found: ${p}`)
+      return p
     }
   }
   log('warn', 'No app icon found')
@@ -105,7 +102,7 @@ function loadAppIcon(): Electron.NativeImage | undefined {
 }
 
 function createWindow(): void {
-  const appIcon = loadAppIcon()
+  const iconPath = getAppIconPath()
 
   mainWindow = new BrowserWindow({
     width: 450,
@@ -117,7 +114,7 @@ function createWindow(): void {
     backgroundColor: '#1a1a2e',
     resizable: true,
     show: false,
-    ...(appIcon ? { icon: appIcon } : {}),
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -151,10 +148,9 @@ function createWindow(): void {
 // ── Tray ───────────────────────────────────────────────────────────────────────
 
 function createTray(): void {
-  const appIcon = loadAppIcon()
-  // Windows tray icons are typically 16x16 but we provide 32x32 for high-DPI
-  const icon = appIcon
-    ? appIcon.resize({ width: 32, height: 32 })
+  const pngPath = getAssetPath('icon.png')
+  const icon = fs.existsSync(pngPath)
+    ? nativeImage.createFromPath(pngPath).resize({ width: 32, height: 32 })
     : nativeImage.createEmpty()
   tray = new Tray(icon)
   tray.setToolTip('Voice Companion')
@@ -355,6 +351,10 @@ app.whenReady().then(() => {
 
   wsClient.on('status', (status) => {
     mainWindow?.webContents.send('ws:status', status)
+  })
+  // Once renderer is ready, push current WS status so it doesn't stay "Disconnected"
+  mainWindow?.webContents.once('did-finish-load', () => {
+    mainWindow?.webContents.send('ws:status', wsClient.getStatus())
   })
   wsClient.on('log', (entry: { level: 'info' | 'warn' | 'error'; message: string }) => {
     const fn = entry.level === 'error' ? console.error : entry.level === 'warn' ? console.warn : console.log

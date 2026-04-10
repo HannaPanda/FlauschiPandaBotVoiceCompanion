@@ -56,7 +56,7 @@ const defaults: Settings = {
 
   whisperMode: 'whisper.cpp',
   whisperModelPath: '',
-  language: 'auto',
+  language: 'de',
   openaiApiKey: '',
   openaiModel: 'whisper-1',
 }

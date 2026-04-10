@@ -27,7 +27,11 @@ function getWhisperBinaryPath(): string {
 }
 
 function getDefaultModelPath(): string {
-  return path.join(getResourcesDir(), 'models', 'ggml-base.en.bin')
+  const resDir = getResourcesDir()
+  // Prefer multilingual model, fall back to English-only
+  const multi = path.join(resDir, 'models', 'ggml-base.bin')
+  if (fs.existsSync(multi)) return multi
+  return path.join(resDir, 'models', 'ggml-base.en.bin')
 }
 
 // Strip whisper.cpp timestamp lines like "[00:00.000 --> 00:02.340]  text"

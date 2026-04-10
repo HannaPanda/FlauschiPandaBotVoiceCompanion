@@ -105,14 +105,14 @@ jobs:
           echo "Whisper resources:"
           ls resources/whisper/
 
-      - name: Download ggml-base.en model
+      - name: Download ggml-base multilingual model
         shell: bash
         run: |
-          echo "Downloading ggml-base.en.bin from HuggingFace..."
+          echo "Downloading ggml-base.bin (multilingual) from HuggingFace..."
           curl -L --retry 3 \
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-            -o resources/models/ggml-base.en.bin
-          echo "Model size: $(wc -c < resources/models/ggml-base.en.bin) bytes"
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" \
+            -o resources/models/ggml-base.bin
+          echo "Model size: $(wc -c < resources/models/ggml-base.bin) bytes"
 
       - name: Install dependencies
         run: npm ci
