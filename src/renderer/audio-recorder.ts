@@ -1,6 +1,6 @@
 /**
- * Audio recorder using Web Audio API.
- * Captures microphone input, detects silence, and encodes 16kHz mono WAV.
+ * Audio recorder using MediaRecorder (reliable in Electron) + AnalyserNode for VAD.
+ * After recording, audio is decoded via AudioContext and re-encoded as 16 kHz mono WAV.
  */
 
 export interface RecorderOptions {
@@ -10,7 +10,6 @@ export interface RecorderOptions {
   micDeviceId?: string       // '' or undefined = system default
   onRecordingStart?: () => void
   onRecordingStop?: () => void
-  onSpeechDetected?: () => void
 }
 
 export interface AudioRecorder {
@@ -18,77 +17,86 @@ export interface AudioRecorder {
   stopRecording(): Promise<ArrayBuffer>
   startKeywordMode(onAudio: (buf: ArrayBuffer) => void): void
   stopKeywordMode(): void
+  getLevel(): number          // current RMS 0-1 (for UI meters)
   cleanup(): void
 }
 
 // ── WAV encoding ───────────────────────────────────────────────────────────────
 
-function downsample(samples: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate) return samples
-  const ratio = fromRate / toRate
-  const newLength = Math.round(samples.length / ratio)
-  const result = new Float32Array(newLength)
-  for (let i = 0; i < newLength; i++) {
+function downsample(buf: Float32Array, from: number, to: number): Float32Array {
+  if (from === to) return buf
+  const ratio = from / to
+  const len = Math.round(buf.length / ratio)
+  const out = new Float32Array(len)
+  for (let i = 0; i < len; i++) {
     const start = Math.floor(i * ratio)
-    const end = Math.min(Math.ceil((i + 1) * ratio), samples.length)
+    const end   = Math.min(Math.ceil((i + 1) * ratio), buf.length)
     let sum = 0
-    for (let j = start; j < end; j++) sum += samples[j]
-    result[i] = sum / (end - start)
+    for (let j = start; j < end; j++) sum += buf[j]
+    out[i] = sum / (end - start)
   }
-  return result
+  return out
 }
 
-export function encodeWAV(chunks: Float32Array[], sampleRate: number): ArrayBuffer {
-  // Concatenate all chunks
-  let totalLength = 0
-  for (const c of chunks) totalLength += c.length
-  const merged = new Float32Array(totalLength)
-  let offset = 0
-  for (const c of chunks) {
-    merged.set(c, offset)
-    offset += c.length
+export function encodeWAV(audioBuffer: AudioBuffer): ArrayBuffer {
+  const TARGET_RATE = 16000
+  // Mix all channels down to mono
+  let mono = new Float32Array(audioBuffer.length)
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const data = audioBuffer.getChannelData(ch)
+    for (let i = 0; i < data.length; i++) mono[i] += data[i]
+  }
+  if (audioBuffer.numberOfChannels > 1) {
+    for (let i = 0; i < mono.length; i++) mono[i] /= audioBuffer.numberOfChannels
   }
 
-  const targetSampleRate = 16000
-  const pcmFloat = downsample(merged, sampleRate, targetSampleRate)
+  const pcmFloat = downsample(mono, audioBuffer.sampleRate, TARGET_RATE)
 
-  // Convert float32 to int16
+  // float32 → int16
   const pcm16 = new Int16Array(pcmFloat.length)
   for (let i = 0; i < pcmFloat.length; i++) {
     const s = Math.max(-1, Math.min(1, pcmFloat[i]))
-    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
   }
 
   const dataSize = pcm16.byteLength
-  const buffer = new ArrayBuffer(44 + dataSize)
-  const view = new DataView(buffer)
+  const wavBuf = new ArrayBuffer(44 + dataSize)
+  const v = new DataView(wavBuf)
+  const str = (off: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)) }
 
-  function writeString(off: number, str: string) {
-    for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i))
-  }
+  str(0,  'RIFF'); v.setUint32(4,  36 + dataSize, true)
+  str(8,  'WAVE'); str(12, 'fmt ')
+  v.setUint32(16, 16,          true)  // subchunk1 size
+  v.setUint16(20, 1,           true)  // PCM
+  v.setUint16(22, 1,           true)  // mono
+  v.setUint32(24, TARGET_RATE, true)
+  v.setUint32(28, TARGET_RATE * 2, true) // byteRate
+  v.setUint16(32, 2,           true)  // blockAlign
+  v.setUint16(34, 16,          true)  // bitsPerSample
+  str(36, 'data'); v.setUint32(40, dataSize, true)
+  new Uint8Array(wavBuf, 44).set(new Uint8Array(pcm16.buffer))
 
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + dataSize, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)          // Subchunk1Size
-  view.setUint16(20, 1, true)           // AudioFormat: PCM
-  view.setUint16(22, 1, true)           // NumChannels: mono
-  view.setUint32(24, targetSampleRate, true)
-  view.setUint32(28, targetSampleRate * 2, true) // ByteRate
-  view.setUint16(32, 2, true)           // BlockAlign
-  view.setUint16(34, 16, true)          // BitsPerSample
-  writeString(36, 'data')
-  view.setUint32(40, dataSize, true)
-
-  // Copy PCM data
-  const uint8View = new Uint8Array(buffer, 44)
-  uint8View.set(new Uint8Array(pcm16.buffer))
-
-  return buffer
+  return wavBuf
 }
 
-// ── RMS calculation ────────────────────────────────────────────────────────────
+// Minimum duration to send to Whisper (~500 ms at 16 kHz mono 16-bit)
+const MIN_WAV_BYTES = 16044
+
+async function blobsToWav(blobs: Blob[]): Promise<ArrayBuffer> {
+  const blob = new Blob(blobs)            // inherits correct MIME from MediaRecorder
+  const encoded = await blob.arrayBuffer()
+
+  // Decode via AudioContext (handles webm/opus, ogg, etc.)
+  const ctx = new AudioContext()
+  try {
+    const audioBuf = await ctx.decodeAudioData(encoded)
+    return encodeWAV(audioBuf)
+  } finally {
+    await ctx.close()
+  }
+}
+
+// ── VAD helper ─────────────────────────────────────────────────────────────────
 
 function calcRMS(data: Float32Array): number {
   let sum = 0
@@ -96,220 +104,240 @@ function calcRMS(data: Float32Array): number {
   return Math.sqrt(sum / data.length)
 }
 
-// ── Recorder factory ───────────────────────────────────────────────────────────
+// ── Factory ────────────────────────────────────────────────────────────────────
 
 export async function createAudioRecorder(options: RecorderOptions): Promise<AudioRecorder> {
-  const audioCtx = new AudioContext()
-  const audioConstraints: MediaTrackConstraints = options.micDeviceId
+  const constraints: MediaTrackConstraints = options.micDeviceId
     ? { deviceId: { exact: options.micDeviceId }, echoCancellation: true, noiseSuppression: true }
     : { echoCancellation: true, noiseSuppression: true }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
-  const source = audioCtx.createMediaStreamSource(stream)
 
-  // AnalyserNode for VAD
-  const analyser = audioCtx.createAnalyser()
-  analyser.fftSize = 2048
-  source.connect(analyser)
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false })
 
-  // ScriptProcessorNode for capturing samples
-  const bufferSize = 4096
-  const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1)
-  source.connect(processor)
-  processor.connect(audioCtx.destination)
-
-  // State
-  let recording = false
-  let chunks: Float32Array[] = []
-  let silenceStart: number | null = null
-  let speechDetected = false
-  let recordingStartTime = 0
-  let recordingResolve: ((buf: ArrayBuffer) => void) | null = null
-  let timeoutTimer: ReturnType<typeof setTimeout> | null = null
-
-  // Pre-buffer for keyword mode (~500ms)
-  const preBufferMaxMs = 500
-  const preBufferMaxChunks = Math.ceil((audioCtx.sampleRate * preBufferMaxMs) / (1000 * bufferSize))
-  let preBuffer: Float32Array[] = []
-
-  // Keyword mode state
-  let keywordMode = false
-  let kwRecording = false
-  let kwChunks: Float32Array[] = []
-  let kwSilenceStart: number | null = null
-  let kwSpeechDetected = false
-  let kwCallback: ((buf: ArrayBuffer) => void) | null = null
-  let kwTimeoutTimer: ReturnType<typeof setTimeout> | null = null
-
-  processor.onaudioprocess = (e) => {
-    const input = e.inputBuffer.getChannelData(0)
-    const copy = new Float32Array(input)
-
-    // Rolling pre-buffer for keyword mode
-    if (keywordMode && !kwRecording) {
-      preBuffer.push(copy)
-      if (preBuffer.length > preBufferMaxChunks) {
-        preBuffer.shift()
-      }
-    }
-
-    // PTT recording
-    if (recording) {
-      chunks.push(copy)
-    }
-
-    // Keyword recording
-    if (kwRecording) {
-      kwChunks.push(copy)
-    }
-  }
-
-  // VAD loop via AnalyserNode
+  // AnalyserNode for VAD only (no ScriptProcessorNode needed)
+  const vadCtx     = new AudioContext()
+  const vadSource  = vadCtx.createMediaStreamSource(stream)
+  const analyser   = vadCtx.createAnalyser()
+  analyser.fftSize = 1024
+  vadSource.connect(analyser)
   const vadData = new Float32Array(analyser.fftSize)
 
-  function vadTick() {
-    if (!keywordMode && !recording) return
+  let currentLevel = 0
 
-    analyser.getFloatTimeDomainData(vadData)
-    const rms = calcRMS(vadData)
-    const now = Date.now()
+  // ── PTT state ────────────────────────────────────────────────────────────────
+  let pttRecorder: MediaRecorder | null = null
+  let pttBlobs: Blob[] = []
+  let pttResolve: ((wav: ArrayBuffer) => void) | null = null
+  let pttTimeout: ReturnType<typeof setTimeout> | null = null
+  let pttSilenceStart: number | null = null
+  let pttSpeechDetected = false
 
-    // ── PTT VAD ────────────────────────────────────────────────────────────
-    if (recording) {
-      if (rms > options.silenceThreshold) {
-        speechDetected = true
-        silenceStart = null
-        if (!speechDetected) options.onSpeechDetected?.()
-      } else if (speechDetected) {
-        if (silenceStart === null) silenceStart = now
-        else if (now - silenceStart > options.silenceDuration) {
-          // Auto-stop after silence
-          _finishPttRecording()
-          return
-        }
-      }
+  // ── Keyword state ────────────────────────────────────────────────────────────
+  let kwActive   = false
+  let kwRecorder: MediaRecorder | null = null
+  let kwBlobs: Blob[] = []
+  let kwCallback: ((wav: ArrayBuffer) => void) | null = null
+  let kwSpeechDetected = false
+  let kwSilenceStart: number | null = null
+  let kwTimeout: ReturnType<typeof setTimeout> | null = null
 
-      // Recording timeout
-      if (now - recordingStartTime > options.recordingTimeout) {
-        _finishPttRecording()
-        return
+  // Pre-buffer: keep last 500 ms of blobs for keyword mode
+  const PRE_BUF_MS = 500
+  let preBlobs: { blob: Blob; ts: number }[] = []
+  let preRecorder: MediaRecorder | null = null
+
+  function getMimeType(): string {
+    for (const t of ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']) {
+      if (MediaRecorder.isTypeSupported(t)) return t
+    }
+    return ''
+  }
+  const mimeType = getMimeType()
+
+  // ── Pre-buffer recorder (always running in keyword mode) ───────────────────
+
+  function startPreBuffer() {
+    if (preRecorder) return
+    preBlobs = []
+    const r = new MediaRecorder(stream, mimeType ? { mimeType } : {})
+    r.ondataavailable = e => {
+      if (e.data.size > 0) {
+        preBlobs.push({ blob: e.data, ts: Date.now() })
+        // Trim old blobs
+        const cutoff = Date.now() - PRE_BUF_MS - 200
+        preBlobs = preBlobs.filter(b => b.ts >= cutoff)
       }
     }
+    r.start(100)
+    preRecorder = r
+  }
 
-    // ── Keyword VAD ────────────────────────────────────────────────────────
-    if (keywordMode) {
-      if (!kwRecording) {
-        if (rms > options.silenceThreshold) {
-          // Start keyword recording, prepend pre-buffer
-          kwRecording = true
-          kwChunks = [...preBuffer]
-          preBuffer = []
+  function stopPreBuffer() {
+    if (!preRecorder) return
+    try { preRecorder.stop() } catch { /* ignore */ }
+    preRecorder = null
+  }
+
+  // ── PTT helpers ───────────────────────────────────────────────────────────
+
+  function finishPtt() {
+    if (!pttRecorder) return
+    clearTimeout(pttTimeout ?? undefined)
+    pttTimeout = null
+    pttRecorder.stop()
+    // onstop handles resolve
+  }
+
+  // ── Keyword helpers ──────────────────────────────────────────────────────
+
+  function startKwRecording() {
+    if (kwRecorder) return
+    stopPreBuffer()
+
+    const preData = preBlobs.map(b => b.blob)
+    kwBlobs = []
+
+    const r = new MediaRecorder(stream, mimeType ? { mimeType } : {})
+    r.ondataavailable = e => { if (e.data.size > 0) kwBlobs.push(e.data) }
+    r.onstop = async () => {
+      kwRecorder = null
+      const allBlobs = [...preData, ...kwBlobs]
+      if (allBlobs.length === 0) { restartPreBuffer(); return }
+      try {
+        const wav = await blobsToWav(allBlobs)
+        if (wav.byteLength >= MIN_WAV_BYTES) kwCallback?.(wav)
+      } catch { /* ignore decode errors for very short clips */ }
+      restartPreBuffer()
+    }
+    r.start(100)
+    kwRecorder = r
+
+    kwTimeout = setTimeout(() => { if (kwRecorder) kwRecorder.stop() }, options.recordingTimeout)
+  }
+
+  function stopKwRecording() {
+    if (!kwRecorder) return
+    clearTimeout(kwTimeout ?? undefined)
+    kwTimeout = null
+    kwRecorder.stop()
+  }
+
+  function restartPreBuffer() {
+    if (kwActive) startPreBuffer()
+  }
+
+  // ── VAD loop ─────────────────────────────────────────────────────────────
+
+  const vadInterval = setInterval(() => {
+    analyser.getFloatTimeDomainData(vadData)
+    const rms = calcRMS(vadData)
+    currentLevel = rms
+    const now  = Date.now()
+    const loud = rms > options.silenceThreshold
+
+    // PTT silence detection (stop recording after silence)
+    if (pttRecorder && pttSpeechDetected) {
+      if (loud) {
+        pttSilenceStart = null
+      } else {
+        if (pttSilenceStart === null) pttSilenceStart = now
+        else if (now - pttSilenceStart > options.silenceDuration) {
+          finishPtt()
+        }
+      }
+    }
+    if (pttRecorder && loud) pttSpeechDetected = true
+
+    // Keyword VAD
+    if (kwActive) {
+      if (!kwRecorder) {
+        if (loud) {
           kwSpeechDetected = true
           kwSilenceStart = null
-          options.onSpeechDetected?.()
-
-          kwTimeoutTimer = setTimeout(() => {
-            if (kwRecording) _finishKwRecording()
-          }, options.recordingTimeout)
+          startKwRecording()
         }
       } else {
-        if (rms > options.silenceThreshold) {
+        if (loud) {
           kwSilenceStart = null
           kwSpeechDetected = true
         } else if (kwSpeechDetected) {
           if (kwSilenceStart === null) kwSilenceStart = now
           else if (now - kwSilenceStart > options.silenceDuration) {
-            _finishKwRecording()
-            return
+            stopKwRecording()
+            kwSpeechDetected = false
+            kwSilenceStart   = null
           }
         }
       }
     }
-  }
+  }, 80)
 
-  const vadInterval = setInterval(vadTick, 100)
-
-  function _finishPttRecording() {
-    if (!recording) return
-    recording = false
-    if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null }
-    options.onRecordingStop?.()
-
-    const wav = encodeWAV(chunks, audioCtx.sampleRate)
-    chunks = []
-    speechDetected = false
-    silenceStart = null
-
-    if (recordingResolve) {
-      recordingResolve(wav)
-      recordingResolve = null
-    }
-  }
-
-  function _finishKwRecording() {
-    if (!kwRecording) return
-    kwRecording = false
-    if (kwTimeoutTimer) { clearTimeout(kwTimeoutTimer); kwTimeoutTimer = null }
-
-    const wav = encodeWAV(kwChunks, audioCtx.sampleRate)
-    kwChunks = []
-    kwSpeechDetected = false
-    kwSilenceStart = null
-
-    if (kwCallback) kwCallback(wav)
-  }
+  // ── Public API ────────────────────────────────────────────────────────────
 
   return {
     startRecording() {
-      if (recording) return
-      chunks = []
-      speechDetected = false
-      silenceStart = null
-      recordingStartTime = Date.now()
-      recording = true
-      options.onRecordingStart?.()
+      if (pttRecorder) return
+      pttBlobs = []
+      pttSpeechDetected = false
+      pttSilenceStart   = null
 
-      timeoutTimer = setTimeout(() => {
-        if (recording) _finishPttRecording()
-      }, options.recordingTimeout)
+      const r = new MediaRecorder(stream, mimeType ? { mimeType } : {})
+      r.ondataavailable = e => { if (e.data.size > 0) pttBlobs.push(e.data) }
+      r.onstop = async () => {
+        pttRecorder = null
+        options.onRecordingStop?.()
+        if (pttBlobs.length === 0) { pttResolve?.(new ArrayBuffer(0)); pttResolve = null; return }
+        try {
+          const wav = await blobsToWav(pttBlobs)
+          pttResolve?.(wav)
+        } catch (e) {
+          pttResolve?.(new ArrayBuffer(0))
+        }
+        pttResolve = null
+      }
+      r.start(100)
+      pttRecorder = r
+
+      // Hard timeout
+      pttTimeout = setTimeout(() => { if (pttRecorder) finishPtt() }, options.recordingTimeout)
+      options.onRecordingStart?.()
     },
 
     stopRecording(): Promise<ArrayBuffer> {
-      if (!recording) {
-        // Return empty WAV if not currently recording
-        return Promise.resolve(encodeWAV([], audioCtx.sampleRate))
-      }
-
-      return new Promise((resolve) => {
-        recordingResolve = resolve
-        _finishPttRecording()
+      if (!pttRecorder) return Promise.resolve(new ArrayBuffer(0))
+      return new Promise(resolve => {
+        pttResolve = resolve
+        finishPtt()
       })
     },
 
-    startKeywordMode(onAudio: (buf: ArrayBuffer) => void) {
-      kwCallback = onAudio
-      keywordMode = true
-      kwRecording = false
-      kwChunks = []
-      preBuffer = []
+    startKeywordMode(cb) {
+      kwCallback = cb
+      kwActive   = true
+      kwSpeechDetected = false
+      kwSilenceStart   = null
+      startPreBuffer()
     },
 
     stopKeywordMode() {
-      keywordMode = false
-      kwRecording = false
-      kwChunks = []
-      preBuffer = []
+      kwActive = false
+      stopKwRecording()
+      stopPreBuffer()
       kwCallback = null
     },
 
+    getLevel() { return currentLevel },
+
     cleanup() {
       clearInterval(vadInterval)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
-      if (kwTimeoutTimer) clearTimeout(kwTimeoutTimer)
-      processor.disconnect()
+      clearTimeout(pttTimeout  ?? undefined)
+      clearTimeout(kwTimeout   ?? undefined)
+      try { pttRecorder?.stop() }   catch { /* ignore */ }
+      try { kwRecorder?.stop() }    catch { /* ignore */ }
+      try { preRecorder?.stop() }   catch { /* ignore */ }
+      vadSource.disconnect()
       analyser.disconnect()
-      source.disconnect()
-      stream.getTracks().forEach((t) => t.stop())
-      audioCtx.close()
+      vadCtx.close()
+      stream.getTracks().forEach(t => t.stop())
     },
   }
 }
